@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- ★ 核心修复：必须声明这行，系统才允许别的应用把特权转移给你 -->
+    <support-transfer-ownership />
+
+    <uses-policies>
+        <limit-password />
+        <watch-login />
+        <reset-password />
+        <force-lock />
+        <wipe-data />
+    </uses-policies>
+</device-admin>
