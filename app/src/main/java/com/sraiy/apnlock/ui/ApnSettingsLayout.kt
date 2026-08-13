@@ -409,8 +409,17 @@ class ApnSettingsLayout(context: Context, private val onStateChange: (isEditing:
         showList()
     }
 
+    // ★ 新增：暴露当前是否在编辑状态
+    fun isEditing(): Boolean {
+        return editContainer.visibility == View.VISIBLE
+    }
+
+    // ★ 修复：只有在编辑状态下，才切回列表
     fun onBackPressed(): Boolean {
-        if (editContainer.visibility == View.VISIBLE) { showList(); return true }
+        if (isEditing()) {
+            showList()
+            return true
+        }
         return false
     }
 

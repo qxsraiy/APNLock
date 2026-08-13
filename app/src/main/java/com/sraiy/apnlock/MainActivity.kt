@@ -23,14 +23,21 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.rosan.dhizuku.api.Dhizuku
 import com.rosan.dhizuku.api.DhizukuRequestPermissionListener
+import com.sraiy.apnlock.admin.RootApnManager
 import com.sraiy.apnlock.receiver.ApnAdminReceiver
 import com.sraiy.apnlock.ui.ApnSettingsLayout
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var apnFormLayout: ApnSettingsLayout
     private lateinit var statusText: TextView
     private lateinit var topHeaderLayout: LinearLayout
+
+    private var hasRootPrivilege = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,9 +120,11 @@ class MainActivity : AppCompatActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (!apnFormLayout.onBackPressed()) {
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
+                // ★ 核心修复：精准判断是否在编辑页面
+                if (apnFormLayout.isEditing()) {
+                    apnFormLayout.onBackPressed() // 返回列表
+                } else {
+                    finish() // 如果已经在列表了，则正常退出 Activity 回到桌面/上级
                 }
             }
         })
@@ -126,27 +135,42 @@ class MainActivity : AppCompatActivity() {
         updateAuthStatus()
     }
 
-    // ★ 明确指出是自有原生还是 Dhizuku 授权
+    // ★ 智能探测层级：Root -> 原生 DO -> Dhizuku
     private fun updateAuthStatus() {
-        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        val isNativeDo = dpm.isDeviceOwnerApp(packageName)
-        val isDhizukuDo = try {
-            Dhizuku.init(this)
-            Dhizuku.isPermissionGranted()
-        } catch (e: Exception) { false }
+        CoroutineScope(Dispatchers.Main).launch {
+            statusText.text = "探测中..."
+            statusText.setTextColor(Color.parseColor("#999999"))
 
-        when {
-            isNativeDo -> {
-                statusText.text = "自有原生 DO 授权"
+            // 异步探测 Root，防止阻塞主线程
+            hasRootPrivilege = withContext(Dispatchers.IO) { RootApnManager.checkRoot() }
+
+            if (hasRootPrivilege) {
+                statusText.text = "Root 强控权限"
                 statusText.setTextColor(Color.parseColor("#34C759")) // 绿色
+                return@launch
             }
-            isDhizukuDo -> {
-                statusText.text = "Dhizuku 代理授权"
-                statusText.setTextColor(Color.parseColor("#007AFF")) // 蓝色
-            }
-            else -> {
-                statusText.text = "尚未获得授权"
-                statusText.setTextColor(Color.parseColor("#FF3B30")) // 红色
+
+            // 没有 Root，回落到 DO/Dhizuku 判定
+            val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            val isNativeDo = dpm.isDeviceOwnerApp(packageName)
+            val isDhizukuDo = try {
+                Dhizuku.init(this@MainActivity)
+                Dhizuku.isPermissionGranted()
+            } catch (e: Exception) { false }
+
+            when {
+                isNativeDo -> {
+                    statusText.text = "自有原生 DO 授权"
+                    statusText.setTextColor(Color.parseColor("#34C759")) // 绿色
+                }
+                isDhizukuDo -> {
+                    statusText.text = "Dhizuku 代理授权"
+                    statusText.setTextColor(Color.parseColor("#007AFF")) // 蓝色
+                }
+                else -> {
+                    statusText.text = "尚未获得授权"
+                    statusText.setTextColor(Color.parseColor("#FF3B30")) // 红色
+                }
             }
         }
     }
@@ -158,12 +182,13 @@ class MainActivity : AppCompatActivity() {
         val isDhizukuDo = try { Dhizuku.init(this); Dhizuku.isPermissionGranted() } catch (e: Exception) { false }
 
         // ★ 核心状态机逻辑：
+        // 0. 有 Root 权限时：自带无敌霸体，所有繁琐的按钮全部变灰不可点
         // 1. 没有权限时：前两个亮，最后一个灰
         // 2. 自有原生权限时：前两个灰，最后一个亮
         // 3. Dhizuku权限时：全部变灰
-        val adbEnabled = !isNativeDo && !isDhizukuDo
-        val dhizukuEnabled = !isNativeDo && !isDhizukuDo
-        val transferEnabled = isNativeDo
+        val adbEnabled = !hasRootPrivilege && !isNativeDo && !isDhizukuDo
+        val dhizukuEnabled = !hasRootPrivilege && !isNativeDo && !isDhizukuDo
+        val transferEnabled = !hasRootPrivilege && isNativeDo
 
         val dialogView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

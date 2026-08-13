@@ -25,65 +25,89 @@ object ActionSetApn {
 
     @SuppressLint("NewApi")
     fun syncApns(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-            Toast.makeText(context, "仅支持 Android 9.0 以上系统", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val isDhizuku = try {
-            Dhizuku.init(context)
-            Dhizuku.isPermissionGranted()
-        } catch (e: Exception) { false }
-
-        // ★ 强化错误拦截：如果反射失败，直接阻断，避免触发 SecurityException 崩溃
-        val dpm = if (isDhizuku) {
-            try {
-                getWrappedDpm(context)
-            } catch (e: Exception) {
-                Log.e(TAG, "Dhizuku Binder Wrapper 反射挂载异常: ", e)
-                CoroutineScope(Dispatchers.Main).launch {
-                    Toast.makeText(context, "底层接口被拦截，请确保 HiddenApiBypass 已生效！", Toast.LENGTH_LONG).show()
-                }
-                return
-            }
-        } else {
-            context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        }
-
-        val adminComponent = if (isDhizuku) {
-            try {
-                Dhizuku.getOwnerComponent()
-            } catch (e: Exception) {
-                ComponentName("com.rosan.dhizuku", "com.rosan.dhizuku.server.DhizukuDAReceiver")
-            }
-        } else {
-            ComponentName(context, ApnAdminReceiver::class.java)
-        }
-
-        val hasPrivilege = if (isDhizuku) true else dpm.isDeviceOwnerApp(context.packageName)
-        if (!hasPrivilege) {
-            Toast.makeText(context, "请先激活设备所有者特权或 Dhizuku 授权！", Toast.LENGTH_SHORT).show()
-            return
-        }
-
         CoroutineScope(Dispatchers.IO).launch {
+            // 1. 获取需要激活的 APN 配置
+            val prefs = context.getSharedPreferences("sraiy_apn_prefs", Context.MODE_PRIVATE)
+            val apnListStr = prefs.getString("apn_list", "[]")
+            val apnArray = JSONArray(apnListStr)
+
+            var activeApnObj: JSONObject? = null
+            for (i in 0 until apnArray.length()) {
+                val obj = apnArray.getJSONObject(i)
+                if (obj.optBoolean("is_active", false)) {
+                    activeApnObj = obj
+                    break
+                }
+            }
+
+            // ==========================================
+            // ★ 通道一：优先尝试 Root 强杀方案
+            // ==========================================
+            if (RootApnManager.checkRoot()) {
+                Log.i(TAG, "🛡️ 检测到 Root 权限，走底层 Content 注入通道")
+                RootApnManager.clearApns()
+
+                if (activeApnObj == null) {
+                    showToast(context, "已通过 Root 恢复系统默认 APN")
+                    return@launch
+                }
+
+                // ★ 修改这里：传入 context 供底层提取 SIM 卡 subId
+                val success = RootApnManager.injectAndLockApn(context, activeApnObj)
+                if (success) {
+                    showToast(context, "✅ [Root] APN 锁定且激活生效！")
+                } else {
+                    showToast(context, "❌ [Root] APN 注入失败！")
+                }
+                return@launch
+            }
+
+            // ==========================================
+            // ★ 通道二：回落到 Device Owner (DO) / Dhizuku 方案
+            // ==========================================
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+                showToast(context, "无 Root 权限时，仅支持 Android 9.0 以上系统")
+                return@launch
+            }
+
+            val isDhizuku = try {
+                Dhizuku.init(context)
+                Dhizuku.isPermissionGranted()
+            } catch (e: Exception) { false }
+
+            // ★ 强化错误拦截：如果反射失败，直接阻断，避免触发 SecurityException 崩溃
+            val dpm = if (isDhizuku) {
+                try {
+                    getWrappedDpm(context)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Dhizuku Binder Wrapper 反射挂载异常: ", e)
+                    showToast(context, "底层接口被拦截，请确保 HiddenApiBypass 已生效！")
+                    return@launch
+                }
+            } else {
+                context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            }
+
+            val adminComponent = if (isDhizuku) {
+                try {
+                    Dhizuku.getOwnerComponent()
+                } catch (e: Exception) {
+                    ComponentName("com.rosan.dhizuku", "com.rosan.dhizuku.server.DhizukuDAReceiver")
+                }
+            } else {
+                ComponentName(context, ApnAdminReceiver::class.java)
+            }
+
+            val hasPrivilege = if (isDhizuku) true else dpm.isDeviceOwnerApp(context.packageName)
+            if (!hasPrivilege) {
+                showToast(context, "请先授予 Root 权限，或激活设备所有者/Dhizuku 授权！")
+                return@launch
+            }
+
             try {
                 val existingApns = dpm.getOverrideApns(adminComponent)
                 for (apn in existingApns) {
                     dpm.removeOverrideApn(adminComponent, apn.id)
-                }
-
-                val prefs = context.getSharedPreferences("sraiy_apn_prefs", Context.MODE_PRIVATE)
-                val apnListStr = prefs.getString("apn_list", "[]")
-                val apnArray = JSONArray(apnListStr)
-
-                var activeApnObj: JSONObject? = null
-                for (i in 0 until apnArray.length()) {
-                    val obj = apnArray.getJSONObject(i)
-                    if (obj.optBoolean("is_active", false)) {
-                        activeApnObj = obj
-                        break
-                    }
                 }
 
                 if (activeApnObj == null) {
@@ -183,10 +207,10 @@ object ActionSetApn {
                 val insertedId = dpm.addOverrideApn(adminComponent, builder.build())
                 if (insertedId != -1) {
                     dpm.setOverrideApnsEnabled(adminComponent, true)
-                    showToast(context, "✅ APN [${activeApnObj.optString("name")}] 锁定且激活生效！")
+                    showToast(context, "✅ [DO] APN [${activeApnObj.optString("name")}] 锁定且激活生效！")
                     Log.i(TAG, "已成功强行接管并唤醒网络为: $apnName")
                 } else {
-                    showToast(context, "❌ APN 注入失败，系统拒绝了该配置")
+                    showToast(context, "❌ [DO] APN 注入失败，系统拒绝了该配置")
                 }
 
             } catch (e: Exception) {
