@@ -12,6 +12,7 @@ import android.telephony.data.ApnSetting
 import android.util.Log
 import android.widget.Toast
 import com.rosan.dhizuku.api.Dhizuku
+import com.sraiy.apnlock.DisclaimerHelper
 import com.sraiy.apnlock.MainActivity
 import com.sraiy.apnlock.receiver.ApnAdminReceiver
 import kotlinx.coroutines.CoroutineScope
@@ -25,8 +26,6 @@ import java.net.InetAddress
 object ActionSetApn {
     private const val TAG = "ApnLock_Admin"
 
-    // ★ 终极防死锁武器：记录当前进程生命周期内是否已经包装过 Dhizuku
-    // 完美解决连续点击导致的 Binder 炸毁问题！
     private var isDhizukuWrapped = false
 
     @SuppressLint("NewApi")
@@ -45,30 +44,45 @@ object ActionSetApn {
                 }
             }
 
-            // ==========================================
-            // ★ 严格的权限探测顺序：原生 DO -> Dhizuku -> Root
-            // ==========================================
             val rawDpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val isNativeDo = rawDpm.isDeviceOwnerApp(context.packageName)
             val isDhizuku = try { Dhizuku.init(context); Dhizuku.isPermissionGranted() } catch (e: Exception) { false }
+            val hasRoot = RootApnManager.checkRoot()
 
-            val hasRoot = if (!isNativeDo && !isDhizuku) RootApnManager.checkRoot() else false
+            // 用户手动指定的模式优先级
+            val preferredMode = prefs.getString("mode_override", "AUTO")
 
-            if (!isNativeDo && !isDhizuku && !hasRoot) {
+            var useNativeDo = false
+            var useDhizuku = false
+            var useRoot = false
+
+            when (preferredMode) {
+                "DO" -> if (isNativeDo) useNativeDo = true
+                "DHIZUKU" -> if (isDhizuku) useDhizuku = true
+                "ROOT" -> if (hasRoot) useRoot = true
+            }
+
+            // AUTO 自动判别模式：DO -> Dhizuku -> Root
+            if (!useNativeDo && !useDhizuku && !useRoot) {
+                if (isNativeDo) useNativeDo = true
+                else if (isDhizuku) useDhizuku = true
+                else if (hasRoot) useRoot = true
+            }
+
+            if (!useNativeDo && !useDhizuku && !useRoot) {
                 showToast(context, "未获取任何权限，请选择授权方案！")
                 val intent = Intent(context, MainActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    putExtra("SHOW_AUTH_DIALOG", true)
                 }
                 context.startActivity(intent)
                 return@launch
             }
 
             // ==========================================
-            // ★ 关闭/恢复情况
+            // ★ 关闭 / 恢复情况
             // ==========================================
             if (activeApnObj == null) {
-                if (isNativeDo) {
+                if (useNativeDo) {
                     val adminComponent = ComponentName(context, ApnAdminReceiver::class.java)
                     rawDpm.setOverrideApnsEnabled(adminComponent, false)
                     try {
@@ -76,48 +90,47 @@ object ActionSetApn {
                         for (apn in existingApns) { rawDpm.removeOverrideApn(adminComponent, apn.id) }
                     } catch (e: Exception) {}
                     showToast(context, "已恢复系统默认 APN (原生 DO)")
-                    Log.i(TAG, "已恢复系统默认 APN (原生 DO)")
                 }
-                else if (isDhizuku) {
+                else if (useDhizuku) {
                     try {
-                        // 核心修复：只在没包装过的时候才去调原版方法！
                         val dpm = if (!isDhizukuWrapped) {
                             val tempDpm = getWrappedDpm(context)
-                            isDhizukuWrapped = true // 标记已包装
+                            isDhizukuWrapped = true
                             tempDpm
                         } else {
-                            rawDpm // 已经包装过，直接用系统的，底层依然是生效的
+                            rawDpm
                         }
 
                         val adminComponent = try { Dhizuku.getOwnerComponent() } catch (e: Exception) { ComponentName("com.rosan.dhizuku", "com.rosan.dhizuku.server.DhizukuDAReceiver") }
 
-                        // 盲发关闭指令，确保不管列表获取崩不崩，覆盖通道必须死！
                         try { dpm.setOverrideApnsEnabled(adminComponent, false) } catch (e: Exception) { }
 
-                        // 尝试清理垃圾
                         try {
                             val existingApns = dpm.getOverrideApns(adminComponent)
                             for (apn in existingApns) { dpm.removeOverrideApn(adminComponent, apn.id) }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Dhizuku 获取列表异常，但覆盖通道已关闭", e)
-                        }
+                        } catch (e: Exception) {}
 
                         showToast(context, "已恢复默认 APN (Dhizuku)\n⚠️ 若未生效请开关一次飞行模式")
-                        Log.i(TAG, "已恢复系统默认 APN (Dhizuku)")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Dhizuku 恢复异常", e)
                         showToast(context, "Dhizuku 恢复出现异常: ${e.message}")
                     }
                 }
-                else if (hasRoot) {
-                    RootApnManager.clearApns()
-                    showToast(context, "已清理 Root 锁定配置\n⚠️ 请开关一次飞行模式")
+                else if (useRoot) {
+                    // ★ 调起 10 秒倒计时蒙版动画
+                    withContext(Dispatchers.Main) {
+                        DisclaimerHelper.showRootProgressOverlay(context) {
+                            CoroutineScope(Dispatchers.IO).launch {
+                                RootApnManager.clearApns()
+                                showToast(context, "已清理 Root 锁定配置\n⚠️ 请开关一次飞行模式")
+                            }
+                        }
+                    }
                 }
                 return@launch
             }
 
             // ==========================================
-            // ★ 开启/注入情况 (配置参数组装，未作任何修改)
+            // ★ 开启 / 注入情况 (底层原样不动)
             // ==========================================
             val apnName = activeApnObj.optString("apn")
             val mcc = activeApnObj.optString("mcc").trim()
@@ -153,9 +166,7 @@ object ActionSetApn {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && apnTypeStr.contains("mcx")) apnTypeBitmask = apnTypeBitmask or ApnSetting.TYPE_MCX
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && apnTypeStr.contains("xcap")) apnTypeBitmask = apnTypeBitmask or ApnSetting.TYPE_XCAP
 
-            if (apnTypeBitmask == 0) {
-                apnTypeBitmask = ApnSetting.TYPE_DEFAULT or ApnSetting.TYPE_SUPL
-            }
+            if (apnTypeBitmask == 0) apnTypeBitmask = ApnSetting.TYPE_DEFAULT or ApnSetting.TYPE_SUPL
             builder.setApnTypeBitmask(apnTypeBitmask)
 
             val networkTypeStr = activeApnObj.optString("networkType", "")
@@ -164,12 +175,10 @@ object ActionSetApn {
             if (networkTypeStr.contains("UMTS")) networkTypeBitmask = networkTypeBitmask or TelephonyManager.NETWORK_TYPE_BITMASK_UMTS.toInt() or TelephonyManager.NETWORK_TYPE_BITMASK_HSPAP.toInt()
             if (networkTypeStr.contains("CDMA")) networkTypeBitmask = networkTypeBitmask or TelephonyManager.NETWORK_TYPE_BITMASK_CDMA.toInt() or TelephonyManager.NETWORK_TYPE_BITMASK_EVDO_A.toInt()
             if (networkTypeStr.contains("GSM")) networkTypeBitmask = networkTypeBitmask or TelephonyManager.NETWORK_TYPE_BITMASK_GSM.toInt() or TelephonyManager.NETWORK_TYPE_BITMASK_EDGE.toInt()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                if (networkTypeStr.contains("NR")) networkTypeBitmask = networkTypeBitmask or TelephonyManager.NETWORK_TYPE_BITMASK_NR.toInt()
-            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && networkTypeStr.contains("NR")) networkTypeBitmask = networkTypeBitmask or TelephonyManager.NETWORK_TYPE_BITMASK_NR.toInt()
             builder.setNetworkTypeBitmask(networkTypeBitmask)
 
-            try { val proxy = activeApnObj.optString("proxy"); if (proxy.isNotBlank()) builder.setProxyAddress(InetAddress.getByName(proxy)) } catch (e: Exception) { Log.w(TAG, "代理地址解析失败") }
+            try { val proxy = activeApnObj.optString("proxy"); if (proxy.isNotBlank()) builder.setProxyAddress(InetAddress.getByName(proxy)) } catch (e: Exception) {}
             val port = activeApnObj.optString("port"); if (port.isNotBlank()) builder.setProxyPort(port.toInt())
             val user = activeApnObj.optString("user"); if (user.isNotBlank()) builder.setUser(user)
             val pass = activeApnObj.optString("pass"); if (pass.isNotBlank()) builder.setPassword(pass)
@@ -178,11 +187,7 @@ object ActionSetApn {
             val mmsPort = activeApnObj.optString("mmsPort"); if (mmsPort.isNotBlank()) builder.setMmsProxyPort(mmsPort.toInt())
             val mvnoType = activeApnObj.optInt("mvnoType", -1); if (mvnoType != -1) { builder.setMvnoType(mvnoType) }
 
-            // ==========================================
-            // ★ 分流注入：原生 DO -> Dhizuku -> Root
-            // ==========================================
-            if (isNativeDo) {
-                Log.i(TAG, "🛡️ 执行 DO 通道注入")
+            if (useNativeDo) {
                 val adminComponent = ComponentName(context, ApnAdminReceiver::class.java)
                 try {
                     val existingApns = rawDpm.getOverrideApns(adminComponent)
@@ -192,14 +197,12 @@ object ActionSetApn {
                 val insertedId = rawDpm.addOverrideApn(adminComponent, builder.build())
                 if (insertedId != -1) {
                     rawDpm.setOverrideApnsEnabled(adminComponent, true)
-                    // ★ 提示中加入当前 APN 名称
                     showToast(context, "✅ [原生 DO] 成功锁定！当前使用: $displayName ($apnName)")
                 } else {
                     showToast(context, "❌ [原生 DO] APN 注入失败，系统拒绝")
                 }
             }
-            else if (isDhizuku) {
-                Log.i(TAG, "🛡️ 执行 Dhizuku 通道注入")
+            else if (useDhizuku) {
                 try {
                     val dpm = if (!isDhizukuWrapped) {
                         val tempDpm = getWrappedDpm(context)
@@ -213,42 +216,38 @@ object ActionSetApn {
                     try {
                         val existingApns = dpm.getOverrideApns(adminComponent)
                         for (apn in existingApns) { dpm.removeOverrideApn(adminComponent, apn.id) }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Dhizuku 获取旧列表异常，直接强行注入", e)
-                    }
+                    } catch (e: Exception) {}
 
                     val insertedId = dpm.addOverrideApn(adminComponent, builder.build())
                     if (insertedId != -1) {
                         dpm.setOverrideApnsEnabled(adminComponent, true)
-                        // ★ 提示中加入当前 APN 名称
                         showToast(context, "✅ [Dhizuku] 成功锁定！当前使用: $displayName ($apnName)")
                     } else {
                         showToast(context, "❌ [Dhizuku] APN 注入失败，系统拒绝")
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Dhizuku 注入异常", e)
                     showToast(context, "Dhizuku 注入异常: ${e.message}")
                 }
             }
-            else if (hasRoot) {
-                Log.i(TAG, "🛡️ 执行 Root 通道注入")
-
-                // ★ 还原为单次流程
-                RootApnManager.clearApns()
-                val success = RootApnManager.injectAndLockApn(context, activeApnObj)
-                if (success) {
-                    // ★ 提示中加入当前 APN 名称
-                    showToast(context, "✅ [Root] 成功锁定！当前使用: $displayName ($apnName)")
-                } else {
-                    showToast(context, "❌ [Root] APN 注入失败！")
+            else if (useRoot) {
+                // ★ 调起 10 秒倒计时蒙版动画
+                withContext(Dispatchers.Main) {
+                    DisclaimerHelper.showRootProgressOverlay(context) {
+                        CoroutineScope(Dispatchers.IO).launch {
+                            RootApnManager.clearApns()
+                            val success = RootApnManager.injectAndLockApn(context, activeApnObj)
+                            if (success) {
+                                showToast(context, "✅ [Root] 成功锁定！当前使用: $displayName ($apnName)")
+                            } else {
+                                showToast(context, "❌ [Root] APN 注入失败！")
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    // ==========================================
-    // 自己的设备所有者模式下的方法不要改：一字未动！
-    // ==========================================
     @SuppressLint("PrivateApi", "DiscouragedPrivateApi", "SoonBlockedPrivateApi")
     @Throws(Exception::class)
     private fun getWrappedDpm(context: Context): DevicePolicyManager {
