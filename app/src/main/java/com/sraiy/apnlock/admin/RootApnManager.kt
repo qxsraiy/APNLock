@@ -65,18 +65,50 @@ object RootApnManager {
         val deleteCmd = "content delete --uri content://telephony/carriers --where \"user_editable=0 AND user_visible=1\""
         executeSuCommand(deleteCmd)
 
-        // 2. ★ 核心恢复：把之前被我们强行休眠的系统原生 APN 全部唤醒！
-        val enableCmd = "content update --uri content://telephony/carriers --bind carrier_enabled:i:1"
+        // 2. ★ 核心恢复 1：加上安全的 --where，防止被系统底层拦截无条件全表更新！
+        // 强行把被休眠的系统原生 APN 全部唤醒！
+        val enableCmd = "content update --uri content://telephony/carriers --bind carrier_enabled:i:1 --where \"carrier_enabled=0\""
         executeSuCommand(enableCmd)
 
-        // 3. ★ 核心恢复 2：砸碎首选 APN 指针，逼迫基带彻底遗忘我们的配置，瞬间回落原生默认！
-        executeSuCommand("content delete --uri content://telephony/carriers/preferapn")
+        // 3. ★ 核心恢复 2：绝不使用 delete 破坏 preferapn！
+        // 智能抓取一个存活的原生 APN，将首选指针指过去，修复系统瞎眼状态
+        val queryResult = executeSuCommand("content query --uri content://telephony/carriers")
+        var fallbackApnId: String? = null
+        val rows = queryResult.split("Row: ")
+        for (row in rows) {
+            // 只要是有 ID 的（因为我们的专属 APN 刚才已经被删了，剩下的必然是原生的）
+            val idMatch = Regex("_id=(\\d+)").find(row)
+            if (idMatch != null) {
+                fallbackApnId = idMatch.groupValues[1]
+                break
+            }
+        }
+
+        if (fallbackApnId != null) {
+            // 采用双字段饱和式覆盖，安全重建系统的默认首选网络
+            val preferUris = mutableListOf("content://telephony/carriers/preferapn")
+            val subId = SubscriptionManager.getDefaultDataSubscriptionId()
+            if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                preferUris.add("content://telephony/carriers/preferapn/subId/$subId")
+            }
+            for (uri in preferUris) {
+                executeSuCommand("content insert --uri $uri --bind apn_id:i:$fallbackApnId --bind _id:i:$fallbackApnId")
+                executeSuCommand("content update --uri $uri --bind apn_id:i:$fallbackApnId --bind _id:i:$fallbackApnId")
+            }
+            Log.i(TAG, "已成功修复首选 APN 指针，指向原生 ID: $fallbackApnId")
+        }
+
+        // 4. ★ 核心恢复 3：致命补全，必须重启基带！否则基带死抱着旧缓存不撒手！
+        Log.i(TAG, "♻️ 正在重启移动数据，强制系统回落原生默认网络...")
+        executeSuCommand("svc data disable")
+        Thread.sleep(1500)
+        executeSuCommand("svc data enable")
 
         Log.i(TAG, "已清理 Root 专属 APN，并全面唤醒了系统的原生 APN")
     }
 
     /**
-     * 核心：通过 Root 注入、全量查询并强锁 APN
+     * 核心：通过 Root 注入、全量查询并强锁 APN (绝无删减，完全使用你的原版)
      */
     suspend fun injectAndLockApn(context: Context, apnConfig: JSONObject): Boolean = withContext(Dispatchers.IO) {
         val name = apnConfig.optString("name", "Sraiy_APN").ifBlank { "Sraiy_APN" }
