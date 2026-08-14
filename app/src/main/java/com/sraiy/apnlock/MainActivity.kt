@@ -197,27 +197,27 @@ class MainActivity : AppCompatActivity() {
 
             when {
                 preferredMode == "DO" && isNativeDo -> {
-                    statusText.text = "原生 DO 授权 (已指定)"
+                    statusText.text = "设备所有者模式"
                     statusText.setTextColor(Color.parseColor("#34C759"))
                 }
                 preferredMode == "DHIZUKU" && isDhizukuDo -> {
-                    statusText.text = "Dhizuku 授权 (已指定)"
+                    statusText.text = "Dhizuku 授权模式"
                     statusText.setTextColor(Color.parseColor("#007AFF"))
                 }
                 preferredMode == "ROOT" && hasRootPrivilege -> {
-                    statusText.text = "Root 授权 (已指定)"
+                    statusText.text = "Root 模式"
                     statusText.setTextColor(Color.parseColor("#FF9500"))
                 }
                 isNativeDo -> {
-                    statusText.text = "原生 DO 授权"
+                    statusText.text = "设备所有者模式"
                     statusText.setTextColor(Color.parseColor("#34C759"))
                 }
                 isDhizukuDo -> {
-                    statusText.text = "Dhizuku 代理授权"
+                    statusText.text = "Dhizuku 授权模式"
                     statusText.setTextColor(Color.parseColor("#007AFF"))
                 }
                 hasRootPrivilege -> {
-                    statusText.text = "Root 强控 (不推荐)"
+                    statusText.text = "Root 模式 (不推荐)"
                     statusText.setTextColor(Color.parseColor("#FF9500"))
                 }
                 else -> {
@@ -340,7 +340,7 @@ class MainActivity : AppCompatActivity() {
         var transferView: View? = null
         if (isNativeDo) {
             transferView = TextView(this).apply {
-                text = "↳ 转移原生设备所有者权限给 Dhizuku"
+                text = "↳ 转移设备所有者权限给 Dhizuku"
                 textSize = 13f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(Color.parseColor("#FF3B30"))
@@ -367,9 +367,9 @@ class MainActivity : AppCompatActivity() {
             if (isDhizukuDo) switchModeAndRestart("DHIZUKU") else requestDhizukuPermission()
         }))
 
-        val rootDesc = "⚠️【不推荐】直接通过 Root 注入 SQLite 数据库。\n特别提示：重置基带有回落失败的风险。"
+        val rootDesc = "⚠️【不推荐】直接通过 Root 注入数据库。\n特别提示：重置基带有回落风险。"
         val rootBtnText = if (hasRootPrivilege) (if (activeMode == "ROOT") "当前生效中" else "切换此模式") else "自动探测"
-        content.addView(createOptionCard("3. Root 强控模式", rootDesc, "#FF9500", rootBtnText, hasRootPrivilege, activeMode == "ROOT", {
+        content.addView(createOptionCard("3. Root 模式", rootDesc, "#FF9500", rootBtnText, hasRootPrivilege, activeMode == "ROOT", {
             if (hasRootPrivilege) switchModeAndRestart("ROOT")
         }))
 

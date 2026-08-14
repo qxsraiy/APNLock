@@ -11,6 +11,7 @@ import android.telephony.TelephonyManager
 import android.telephony.data.ApnSetting
 import android.util.Log
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import com.rosan.dhizuku.api.Dhizuku
 import com.sraiy.apnlock.DisclaimerHelper
 import com.sraiy.apnlock.MainActivity
@@ -44,14 +45,15 @@ object ActionSetApn {
                 }
             }
 
+            // ==========================================
+            // ★ 严格的权限探测顺序：原生 DO -> Dhizuku -> Root
+            // ==========================================
             val rawDpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val isNativeDo = rawDpm.isDeviceOwnerApp(context.packageName)
             val isDhizuku = try { Dhizuku.init(context); Dhizuku.isPermissionGranted() } catch (e: Exception) { false }
             val hasRoot = RootApnManager.checkRoot()
 
-            // 用户手动指定的模式优先级
             val preferredMode = prefs.getString("mode_override", "AUTO")
-
             var useNativeDo = false
             var useDhizuku = false
             var useRoot = false
@@ -62,7 +64,6 @@ object ActionSetApn {
                 "ROOT" -> if (hasRoot) useRoot = true
             }
 
-            // AUTO 自动判别模式：DO -> Dhizuku -> Root
             if (!useNativeDo && !useDhizuku && !useRoot) {
                 if (isNativeDo) useNativeDo = true
                 else if (isDhizuku) useDhizuku = true
@@ -90,6 +91,7 @@ object ActionSetApn {
                         for (apn in existingApns) { rawDpm.removeOverrideApn(adminComponent, apn.id) }
                     } catch (e: Exception) {}
                     showToast(context, "已恢复系统默认 APN (原生 DO)")
+                    Log.i(TAG, "已恢复系统默认 APN (原生 DO)")
                 }
                 else if (useDhizuku) {
                     try {
@@ -100,11 +102,9 @@ object ActionSetApn {
                         } else {
                             rawDpm
                         }
-
                         val adminComponent = try { Dhizuku.getOwnerComponent() } catch (e: Exception) { ComponentName("com.rosan.dhizuku", "com.rosan.dhizuku.server.DhizukuDAReceiver") }
 
                         try { dpm.setOverrideApnsEnabled(adminComponent, false) } catch (e: Exception) { }
-
                         try {
                             val existingApns = dpm.getOverrideApns(adminComponent)
                             for (apn in existingApns) { dpm.removeOverrideApn(adminComponent, apn.id) }
@@ -116,14 +116,20 @@ object ActionSetApn {
                     }
                 }
                 else if (useRoot) {
-                    // ★ 调起 10 秒倒计时蒙版动画
+                    // ★ 核心修复：弹出“关闭”样式的加载框，真实耗时等待！
+                    var dialog: AlertDialog? = null
                     withContext(Dispatchers.Main) {
-                        DisclaimerHelper.showRootProgressOverlay(context) {
-                            CoroutineScope(Dispatchers.IO).launch {
-                                RootApnManager.clearApns()
-                                showToast(context, "已清理 Root 锁定配置\n⚠️ 请开关一次飞行模式")
-                            }
-                        }
+                        // isEnabling = false 代表这是关闭/恢复默认的操作
+                        dialog = DisclaimerHelper.showRootProgressOverlay(context, false)
+                    }
+
+                    // 真实执行耗时操作
+                    RootApnManager.clearApns()
+
+                    // 操作完成，立刻关闭弹窗并弹出终点信息
+                    withContext(Dispatchers.Main) {
+                        try { dialog?.dismiss() } catch (e: Exception) {}
+                        showToast(context, "已清理 Root 锁定配置\n⚠️ 请开关一次飞行模式")
                     }
                 }
                 return@launch
@@ -230,18 +236,24 @@ object ActionSetApn {
                 }
             }
             else if (useRoot) {
-                // ★ 调起 10 秒倒计时蒙版动画
+                // ★ 核心修复：弹出“开启”样式的加载框，真实耗时等待！
+                var dialog: AlertDialog? = null
                 withContext(Dispatchers.Main) {
-                    DisclaimerHelper.showRootProgressOverlay(context) {
-                        CoroutineScope(Dispatchers.IO).launch {
-                            RootApnManager.clearApns()
-                            val success = RootApnManager.injectAndLockApn(context, activeApnObj)
-                            if (success) {
-                                showToast(context, "✅ [Root] 成功锁定！当前使用: $displayName ($apnName)")
-                            } else {
-                                showToast(context, "❌ [Root] APN 注入失败！")
-                            }
-                        }
+                    // isEnabling = true 代表这是注入/开启的操作
+                    dialog = DisclaimerHelper.showRootProgressOverlay(context, true)
+                }
+
+                // 真实执行耗时操作
+                RootApnManager.clearApns()
+                val success = RootApnManager.injectAndLockApn(context, activeApnObj)
+
+                // 操作完成，立刻关闭弹窗并弹出终点信息
+                withContext(Dispatchers.Main) {
+                    try { dialog?.dismiss() } catch (e: Exception) {}
+                    if (success) {
+                        showToast(context, "✅ [Root] 成功锁定！当前使用: $displayName ($apnName)")
+                    } else {
+                        showToast(context, "❌ [Root] APN 注入失败！")
                     }
                 }
             }

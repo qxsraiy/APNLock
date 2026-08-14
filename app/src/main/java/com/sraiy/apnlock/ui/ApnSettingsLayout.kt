@@ -109,9 +109,9 @@ class ApnSettingsLayout(
             }
         }
 
-        toolbarLayout.addView(createSmallBtn("📤 导出", "#5856D6") { onExportClick() })
-        toolbarLayout.addView(createSmallBtn("📥 导入", "#007AFF") { onImportClick() })
-        toolbarLayout.addView(createSmallBtn("🔍 读取系统", "#34C759") { onFetchSystemClick() })
+        toolbarLayout.addView(createSmallBtn("📤 备份导出", "#5856D6") { onExportClick() })
+        toolbarLayout.addView(createSmallBtn("📥 导入备份", "#007AFF") { onImportClick() })
+        toolbarLayout.addView(createSmallBtn("🔍 ROOT读取", "#34C759") { onFetchSystemClick() })
         listContainer.addView(toolbarLayout)
 
         val scroll = ScrollView(context).apply { layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) }
