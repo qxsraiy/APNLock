@@ -80,7 +80,7 @@ object ActionSetApn {
                 }
                 else if (isDhizuku) {
                     try {
-                        // ★ 核心修复：只在没包装过的时候才去调你的原版方法！
+                        // 核心修复：只在没包装过的时候才去调原版方法！
                         val dpm = if (!isDhizukuWrapped) {
                             val tempDpm = getWrappedDpm(context)
                             isDhizukuWrapped = true // 标记已包装
@@ -128,8 +128,9 @@ object ActionSetApn {
                 return@launch
             }
 
+            val displayName = activeApnObj.optString("name").ifBlank { "Locked_APN" }
             val builder = ApnSetting.Builder()
-                .setEntryName(activeApnObj.optString("name").ifBlank { "Locked_APN" })
+                .setEntryName(displayName)
                 .setApnName(apnName)
                 .setAuthType(activeApnObj.optInt("authType", ApnSetting.AUTH_TYPE_NONE))
                 .setProtocol(activeApnObj.optInt("protocol", ApnSetting.PROTOCOL_IP))
@@ -191,7 +192,8 @@ object ActionSetApn {
                 val insertedId = rawDpm.addOverrideApn(adminComponent, builder.build())
                 if (insertedId != -1) {
                     rawDpm.setOverrideApnsEnabled(adminComponent, true)
-                    showToast(context, "✅ [原生 DO] APN 锁定且激活生效！")
+                    // ★ 提示中加入当前 APN 名称
+                    showToast(context, "✅ [原生 DO] 成功锁定！当前使用: $displayName ($apnName)")
                 } else {
                     showToast(context, "❌ [原生 DO] APN 注入失败，系统拒绝")
                 }
@@ -218,7 +220,8 @@ object ActionSetApn {
                     val insertedId = dpm.addOverrideApn(adminComponent, builder.build())
                     if (insertedId != -1) {
                         dpm.setOverrideApnsEnabled(adminComponent, true)
-                        showToast(context, "✅ [Dhizuku] APN 锁定且激活生效！")
+                        // ★ 提示中加入当前 APN 名称
+                        showToast(context, "✅ [Dhizuku] 成功锁定！当前使用: $displayName ($apnName)")
                     } else {
                         showToast(context, "❌ [Dhizuku] APN 注入失败，系统拒绝")
                     }
@@ -230,18 +233,12 @@ object ActionSetApn {
             else if (hasRoot) {
                 Log.i(TAG, "🛡️ 执行 Root 通道注入")
 
-                Log.i(TAG, "=== 开始执行 Root 第 1 次锁定 ===")
-                RootApnManager.clearApns()
-                RootApnManager.injectAndLockApn(context, activeApnObj)
-
-                Thread.sleep(1500)
-
-                Log.i(TAG, "=== 开始执行 Root 第 2 次锁定 (巩固) ===")
+                // ★ 还原为单次流程
                 RootApnManager.clearApns()
                 val success = RootApnManager.injectAndLockApn(context, activeApnObj)
-
                 if (success) {
-                    showToast(context, "✅ [Root] APN 连续巩固锁定生效！")
+                    // ★ 提示中加入当前 APN 名称
+                    showToast(context, "✅ [Root] 成功锁定！当前使用: $displayName ($apnName)")
                 } else {
                     showToast(context, "❌ [Root] APN 注入失败！")
                 }

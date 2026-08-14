@@ -13,6 +13,9 @@ import java.io.InputStreamReader
 object RootApnManager {
     private const val TAG = "ApnLock_Root"
 
+    // ★ 智能拦截机制：防止连续执行两次时，误删刚建好的 APN 导致基带抓瞎
+    private var lastClearTime = 0L
+
     /**
      * 执行 Root Shell 命令并返回结果
      */
@@ -24,6 +27,7 @@ object RootApnManager {
             os.writeBytes(command + "\n")
             os.writeBytes("exit\n")
             os.flush()
+            os.close() // ★ 极其重要：关闭输入流防止底层 Shell 卡死堵塞
 
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             val errorReader = BufferedReader(InputStreamReader(process.errorStream))
@@ -49,9 +53,26 @@ object RootApnManager {
     }
 
     suspend fun clearApns() {
+        val now = System.currentTimeMillis()
+        // 智能拦截 3 秒内的重复清理，保护基带正在切换的热缓存
+        if (now - lastClearTime < 3000) {
+            Log.i(TAG, "短时间内重复执行清理，已智能拦截！")
+            return
+        }
+        lastClearTime = now
+
+        // 1. 删除我们锁定的专属 APN
         val deleteCmd = "content delete --uri content://telephony/carriers --where \"user_editable=0 AND user_visible=1\""
         executeSuCommand(deleteCmd)
-        Log.i(TAG, "已清理旧的 Root APN 配置")
+
+        // 2. ★ 核心恢复：把之前被我们强行休眠的系统原生 APN 全部唤醒！
+        val enableCmd = "content update --uri content://telephony/carriers --bind carrier_enabled:i:1"
+        executeSuCommand(enableCmd)
+
+        // 3. ★ 核心恢复 2：砸碎首选 APN 指针，逼迫基带彻底遗忘我们的配置，瞬间回落原生默认！
+        executeSuCommand("content delete --uri content://telephony/carriers/preferapn")
+
+        Log.i(TAG, "已清理 Root 专属 APN，并全面唤醒了系统的原生 APN")
     }
 
     /**
@@ -72,49 +93,11 @@ object RootApnManager {
         val subId = SubscriptionManager.getDefaultDataSubscriptionId()
         Log.i(TAG, "🎯 锁定当前数据卡: subId=$subId")
 
-        val type = apnConfig.optString("apnType", "").ifEmpty { "default,supl" }
-        val authType = apnConfig.optInt("authType", 0)
-
-        // 1. 组装插入命令
-        val insertCmdBuilder = StringBuilder("content insert --uri content://telephony/carriers ")
-        insertCmdBuilder.append("--bind name:s:\"$name\" ")
-        insertCmdBuilder.append("--bind apn:s:\"$apn\" ")
-        insertCmdBuilder.append("--bind mcc:s:\"$mcc\" ")
-        insertCmdBuilder.append("--bind mnc:s:\"$mnc\" ")
-        insertCmdBuilder.append("--bind numeric:s:\"${mcc}${mnc}\" ")
-        insertCmdBuilder.append("--bind type:s:\"$type\" ")
-        insertCmdBuilder.append("--bind authtype:i:$authType ")
-
-        val proxy = apnConfig.optString("proxy", "")
-        if (proxy.isNotEmpty()) insertCmdBuilder.append("--bind proxy:s:\"$proxy\" ")
-
-        val port = apnConfig.optString("port", "")
-        if (port.isNotEmpty()) insertCmdBuilder.append("--bind port:s:\"$port\" ")
-
-        // 绑定真实的 SIM 卡 ID
-        if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-            insertCmdBuilder.append("--bind sub_id:i:$subId ")
-        }
-
-        // 强锁机制：不可编辑 + 强制激活
-        insertCmdBuilder.append("--bind user_editable:i:0 ")
-        insertCmdBuilder.append("--bind user_visible:i:1 ")
-        insertCmdBuilder.append("--bind current:i:1 ")
-        insertCmdBuilder.append("--bind carrier_enabled:i:1 ")
-
-        Log.i(TAG, "执行注入指令: $insertCmdBuilder")
-        executeSuCommand(insertCmdBuilder.toString())
-
         // ==========================================
-        // ★ 核心修复 1：将等待时间增加到 1500ms，确保底层 SQLite 彻底落盘完毕
-        // 否则后续设置 preferapn 时，系统会因为找不到这个 ID 而默默丢弃指令！
+        // 先查询是否已经存在该 APN（应对 ActionSetApn 的第二次巩固调用）
         // ==========================================
-        Log.i(TAG, "等待数据库落盘...")
-        Thread.sleep(1500)
-
-        // 2. 内存匹配获取真实 ID
         val queryCmd = "content query --uri content://telephony/carriers"
-        val queryResult = executeSuCommand(queryCmd)
+        var queryResult = executeSuCommand(queryCmd)
 
         var apnId: String? = null
         val rows = queryResult.split("Row: ")
@@ -128,11 +111,79 @@ object RootApnManager {
             }
         }
 
+        // 如果不存在，则进行全新注入
+        if (apnId == null) {
+            val type = apnConfig.optString("apnType", "").ifEmpty { "default,supl" }
+            val authType = apnConfig.optInt("authType", 0)
+
+            val insertCmdBuilder = StringBuilder("content insert --uri content://telephony/carriers ")
+            insertCmdBuilder.append("--bind name:s:\"$name\" ")
+            insertCmdBuilder.append("--bind apn:s:\"$apn\" ")
+            insertCmdBuilder.append("--bind mcc:s:\"$mcc\" ")
+            insertCmdBuilder.append("--bind mnc:s:\"$mnc\" ")
+            insertCmdBuilder.append("--bind numeric:s:\"${mcc}${mnc}\" ")
+            insertCmdBuilder.append("--bind type:s:\"$type\" ")
+            insertCmdBuilder.append("--bind authtype:i:$authType ")
+
+            // 补充必带协议，防止挑剔的基带直接丢弃
+            insertCmdBuilder.append("--bind protocol:s:\"IP\" ")
+            insertCmdBuilder.append("--bind roaming_protocol:s:\"IP\" ")
+
+            val proxy = apnConfig.optString("proxy", "")
+            if (proxy.isNotEmpty()) insertCmdBuilder.append("--bind proxy:s:\"$proxy\" ")
+
+            val port = apnConfig.optString("port", "")
+            if (port.isNotEmpty()) insertCmdBuilder.append("--bind port:s:\"$port\" ")
+
+            if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                insertCmdBuilder.append("--bind sub_id:i:$subId ")
+            }
+
+            insertCmdBuilder.append("--bind user_editable:i:0 ")
+            insertCmdBuilder.append("--bind user_visible:i:1 ")
+            insertCmdBuilder.append("--bind current:i:1 ")
+            insertCmdBuilder.append("--bind carrier_enabled:i:1 ")
+
+            Log.i(TAG, "执行全新注入指令: $insertCmdBuilder")
+            executeSuCommand(insertCmdBuilder.toString())
+
+            Log.i(TAG, "等待数据库落盘...")
+            Thread.sleep(1500)
+
+            // 再次匹配真实 ID
+            queryResult = executeSuCommand(queryCmd)
+            val newRows = queryResult.split("Row: ")
+            for (row in newRows.reversed()) {
+                if (row.contains("name=$name") || row.contains("name=\"$name\"")) {
+                    val idMatch = Regex("_id=(\\d+)").find(row)
+                    if (idMatch != null) {
+                        apnId = idMatch.groupValues[1]
+                        break
+                    }
+                }
+            }
+        } else {
+            Log.i(TAG, "检测到 APN (ID=$apnId) 已在上一轮写入，直接跳过注入，进入基带巩固锁定！")
+        }
+
         if (apnId != null) {
-            Log.i(TAG, "✅ 提取到真实 APN ID: $apnId，执行无损平滑切换！")
+            Log.i(TAG, "✅ 提取到真实 APN ID: $apnId，准备执行饱和式封锁！")
 
             // ==========================================
-            // ★ 核心修复 2：绝不使用 delete 破坏 XML 结构，直接用 update 强制覆写
+            // ★ 终极破局机制：釜底抽薪，把系统退路全砸了！
+            // 强行将该 SIM 卡下其他所有的原生 APN 全部休眠 (carrier_enabled=0)
+            // 逼迫 Android DcTracker 只能死死咬住我们的 APN！
+            // ==========================================
+            val disableOthersCmd = if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                "content update --uri content://telephony/carriers --bind carrier_enabled:i:0 --where \"_id!=$apnId AND sub_id=$subId\""
+            } else {
+                "content update --uri content://telephony/carriers --bind carrier_enabled:i:0 --where \"_id!=$apnId\""
+            }
+            executeSuCommand(disableOthersCmd)
+            Log.i(TAG, "已强行休眠所有原生 APN，切断了基带回落的退路")
+
+            // ==========================================
+            // ★ 完美切换：去除了导致失败的 _id 绑定，精准打击 preferapn
             // ==========================================
             val preferUris = mutableListOf("content://telephony/carriers/preferapn")
             if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
